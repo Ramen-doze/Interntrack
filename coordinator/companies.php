@@ -4,14 +4,65 @@ require_once __DIR__ . '/../includes/auth.php';
 require_role(['coordinator']);
 
 $page_title = 'Companies';
+$action_error = '';
+$action_notice = $_SESSION['company_action_notice'] ?? '';
+unset($_SESSION['company_action_notice']);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
+        http_response_code(400);
+        exit('Invalid form submission. Refresh the page and try again.');
+    }
+
+    $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
+    $company_id_raw = $_POST['company_id'] ?? null;
+    $company_id = is_string($company_id_raw)
+        ? filter_var($company_id_raw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+        : false;
+    $company_name = is_string($_POST['company_name'] ?? null) ? trim($_POST['company_name']) : '';
+    $address = is_string($_POST['address'] ?? null) ? trim($_POST['address']) : '';
+    $contact_person = is_string($_POST['contact_person'] ?? null) ? trim($_POST['contact_person']) : '';
+    $contact_email = is_string($_POST['contact_email'] ?? null) ? trim($_POST['contact_email']) : '';
+    $contact_number = is_string($_POST['contact_number'] ?? null) ? trim($_POST['contact_number']) : '';
+    $company_status = is_string($_POST['company_status'] ?? null) ? $_POST['company_status'] : 'active';
+
+    if (!in_array($action, ['create', 'update'], true) || $company_name === '' || strlen($company_name) > 150
+        || strlen($address) > 255 || strlen($contact_person) > 150 || strlen($contact_number) > 50
+        || ($contact_email !== '' && (!filter_var($contact_email, FILTER_VALIDATE_EMAIL) || strlen($contact_email) > 150))
+        || !in_array($company_status, ['active', 'inactive'], true)
+        || ($action === 'update' && $company_id === false)) {
+        $action_error = 'Enter a company name and valid contact details.';
+    } else {
+        if ($action === 'create') {
+            $save_stmt = $conn->prepare("
+                INSERT INTO companies (company_name, address, contact_person, contact_email, contact_number, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ");
+            $save_stmt->bind_param('ssssss', $company_name, $address, $contact_person, $contact_email, $contact_number, $company_status);
+        } else {
+            $save_stmt = $conn->prepare("
+                UPDATE companies
+                SET company_name = ?, address = ?, contact_person = ?, contact_email = ?, contact_number = ?, status = ?
+                WHERE company_id = ?
+            ");
+            $save_stmt->bind_param('ssssssi', $company_name, $address, $contact_person, $contact_email, $contact_number, $company_status, $company_id);
+        }
+
+        if ($save_stmt->execute()) {
+            $_SESSION['company_action_notice'] = $action === 'create' ? 'Company created.' : 'Company updated.';
+            header('Location: companies.php');
+            exit;
+        }
+        $action_error = 'Could not save this company. Check for invalid or duplicate details.';
+    }
+}
 
 $search = trim($_GET['search'] ?? '');
 $status = $_GET['status'] ?? '';
 
 $allowed_statuses = [
     'active',
-    'inactive',
-    'pending'
+    'inactive'
 ];
 
 $sql = "
@@ -19,6 +70,10 @@ $sql = "
         c.company_id,
         c.company_name,
         c.status,
+        c.address,
+        c.contact_person,
+        c.contact_email,
+        c.contact_number,
         COUNT(i.internship_id) AS internship_count
     FROM companies c
     LEFT JOIN internships i
@@ -58,7 +113,11 @@ $sql .= "
     GROUP BY
         c.company_id,
         c.company_name,
-        c.status
+        c.status,
+        c.address,
+        c.contact_person,
+        c.contact_email,
+        c.contact_number
     ORDER BY c.company_name ASC
 ";
 
@@ -120,11 +179,6 @@ $active_companies = company_count(
 $inactive_companies = company_count(
     $conn,
     "status = 'inactive'"
-);
-
-$pending_companies = company_count(
-    $conn,
-    "status = 'pending'"
 );
 
 require_once __DIR__ . '/../includes/header.php';
@@ -255,22 +309,6 @@ require_once __DIR__ . '/../includes/header.php';
     </div>
 
 
-    <div class="stat-card">
-
-        <div class="stat-icon">P</div>
-
-        <div>
-
-            <span>Pending Companies</span>
-
-            <strong>
-                <?= $pending_companies ?>
-            </strong>
-
-        </div>
-
-    </div>
-
 </div>
 
 <section class="panel" style="margin-top:24px;">
@@ -285,13 +323,6 @@ require_once __DIR__ . '/../includes/header.php';
                 View and monitor partner companies registered in InternTrack.
             </p>
 
-            <div class="company-count">
-
-                <?= count($companies) ?>
-                company(s) currently shown
-
-            </div>
-
         </div>
 
         <div class="company-badge">
@@ -300,6 +331,24 @@ require_once __DIR__ . '/../includes/header.php';
 
     </div>
 
+    <?php if ($action_notice !== ''): ?><div class="alert success"><?= htmlspecialchars($action_notice) ?></div><?php endif; ?>
+    <?php if ($action_error !== ''): ?><div class="alert"><?= htmlspecialchars($action_error) ?></div><?php endif; ?>
+
+    <details class="crud-editor" open>
+        <summary>Add partner company</summary>
+        <br>
+        <form method="POST" class="crud-form">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+            <input type="hidden" name="action" value="create">
+            <label>Company name<input name="company_name" maxlength="150" required></label>
+            <label>Address<input name="address" maxlength="255"></label>
+            <label>Contact person<input name="contact_person" maxlength="150"></label>
+            <label>Contact email<input type="email" name="contact_email" maxlength="150"></label>
+            <label>Contact number<input name="contact_number" maxlength="50"></label>
+            <button class="btn primary" type="submit" style="margin-top: 10px;">Add company</button>
+        </form>
+    </details>
+    <br>
     <form
         method="GET"
         class="filter-form"
@@ -333,13 +382,6 @@ require_once __DIR__ . '/../includes/header.php';
                 Inactive
             </option>
 
-            <option
-                value="pending"
-                <?= $status === 'pending' ? 'selected' : '' ?>
-            >
-                Pending
-            </option>
-
         </select>
 
 
@@ -370,6 +412,7 @@ require_once __DIR__ . '/../includes/header.php';
                     <th>Status</th>
 
                     <th>Internships</th>
+                    <th>Manage</th>
 
                 </tr>
 
@@ -393,7 +436,6 @@ require_once __DIR__ . '/../includes/header.php';
                             </strong>
 
                         </td>
-
 
                         <td>
 
@@ -423,6 +465,24 @@ require_once __DIR__ . '/../includes/header.php';
 
                         </td>
 
+                        <td>
+                            <details class="crud-editor">
+                                <summary>Edit</summary>
+                                <form method="POST" class="crud-form stacked">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+                                    <input type="hidden" name="action" value="update">
+                                    <input type="hidden" name="company_id" value="<?= (int) $company['company_id'] ?>">
+                                    <label>Name<input name="company_name" maxlength="150" required value="<?= htmlspecialchars($company['company_name']) ?>"></label>
+                                    <label>Address<input name="address" maxlength="255" value="<?= htmlspecialchars($company['address'] ?? '') ?>"></label>
+                                    <label>Contact person<input name="contact_person" maxlength="150" value="<?= htmlspecialchars($company['contact_person'] ?? '') ?>"></label>
+                                    <label>Contact email<input type="email" name="contact_email" maxlength="150" value="<?= htmlspecialchars($company['contact_email'] ?? '') ?>"></label>
+                                    <label>Contact number<input name="contact_number" maxlength="50" value="<?= htmlspecialchars($company['contact_number'] ?? '') ?>"></label>
+                                    <label>Status<select name="company_status"><option value="active" <?= $company['status'] === 'active' ? 'selected' : '' ?>>Active</option><option value="inactive" <?= $company['status'] === 'inactive' ? 'selected' : '' ?>>Inactive</option></select></label>
+                                    <button class="btn primary" type="submit">Save changes</button>
+                                </form>
+                            </details>
+                        </td>
+
                     </tr>
 
                 <?php endforeach; ?>
@@ -432,7 +492,7 @@ require_once __DIR__ . '/../includes/header.php';
                 <tr>
 
                     <td
-                        colspan="3"
+                        colspan="4"
                         class="empty-state"
                     >
                         No companies found.

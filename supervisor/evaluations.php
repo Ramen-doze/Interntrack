@@ -8,6 +8,116 @@ $supervisor_id = (int)($_SESSION['user_id'] ?? 0);
 
 $search = trim($_GET['search'] ?? '');
 $type_filter = trim($_GET['type'] ?? '');
+$action_error = '';
+$action_notice = $_SESSION['evaluation_notice'] ?? '';
+unset($_SESSION['evaluation_notice']);
+
+$intern_options_result = $conn->prepare("
+    SELECT i.internship_id, u.full_name, c.company_name
+    FROM internships i
+    JOIN users u ON u.user_id = i.student_id
+    JOIN companies c ON c.company_id = i.company_id
+    WHERE i.supervisor_id = ? AND i.status IN ('pending', 'ongoing', 'completed')
+    ORDER BY u.full_name
+");
+$intern_options_result->bind_param('i', $supervisor_id);
+$intern_options_result->execute();
+$intern_options = $intern_options_result->get_result()->fetch_all(MYSQLI_ASSOC);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
+        http_response_code(400);
+        exit('Invalid form submission. Refresh the page and try again.');
+    }
+
+    $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
+    $evaluation_id_raw = $_POST['evaluation_id'] ?? null;
+    $evaluation_id = is_string($evaluation_id_raw)
+        ? filter_var($evaluation_id_raw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+        : false;
+    $internship_raw = $_POST['internship_id'] ?? null;
+    $internship_id = is_string($internship_raw)
+        ? filter_var($internship_raw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+        : false;
+    $type = is_string($_POST['evaluation_type'] ?? null) ? $_POST['evaluation_type'] : '';
+    $rating_value = is_string($_POST['rating'] ?? null) ? $_POST['rating'] : '';
+    $rating = filter_var($rating_value, FILTER_VALIDATE_FLOAT);
+    $comments = is_string($_POST['comments'] ?? null) ? trim($_POST['comments']) : '';
+
+    if (!in_array($action, ['create', 'update'], true)
+        || !in_array($type, ['midterm', 'final'], true)
+        || $rating === false || $rating < 1 || $rating > 5
+        || $comments === '' || strlen($comments) > 10000
+        || ($action === 'create' && $internship_id === false)
+        || ($action === 'update' && $evaluation_id === false)) {
+        $action_error = 'Enter a rating from 1 to 5 and feedback, then choose a valid evaluation type.';
+    } elseif ($action === 'create') {
+        $owned_stmt = $conn->prepare("
+            SELECT internship_id FROM internships
+            WHERE internship_id = ? AND supervisor_id = ?
+            LIMIT 1
+        ");
+        $owned_stmt->bind_param('ii', $internship_id, $supervisor_id);
+        $owned_stmt->execute();
+        if (!$owned_stmt->get_result()->fetch_assoc()) {
+            $action_error = 'That internship is not assigned to you.';
+        } else {
+            $duplicate_stmt = $conn->prepare("
+                SELECT evaluation_id FROM evaluations
+                WHERE internship_id = ? AND evaluation_type = ?
+                LIMIT 1
+            ");
+            $duplicate_stmt->bind_param('is', $internship_id, $type);
+            $duplicate_stmt->execute();
+            if ($duplicate_stmt->get_result()->fetch_assoc()) {
+                $action_error = 'An evaluation of this type already exists for that internship.';
+            } else {
+                $create_stmt = $conn->prepare("
+                    INSERT INTO evaluations (internship_id, evaluator_id, evaluation_type, rating, comments)
+                    VALUES (?, ?, ?, ?, ?)
+                ");
+                $create_stmt->bind_param('iisds', $internship_id, $supervisor_id, $type, $rating, $comments);
+                if ($create_stmt->execute()) {
+                    $_SESSION['evaluation_notice'] = 'Evaluation submitted.';
+                    header('Location: evaluations.php');
+                    exit;
+                }
+                $action_error = 'Could not save this evaluation.';
+            }
+        }
+    } else {
+        $duplicate_stmt = $conn->prepare("
+            SELECT conflicting.evaluation_id
+            FROM evaluations original_eval
+            JOIN internships i ON i.internship_id = original_eval.internship_id
+            JOIN evaluations conflicting
+                ON conflicting.internship_id = original_eval.internship_id
+                AND conflicting.evaluation_type = ?
+                AND conflicting.evaluation_id <> original_eval.evaluation_id
+            WHERE original_eval.evaluation_id = ? AND i.supervisor_id = ?
+            LIMIT 1
+        ");
+        $duplicate_stmt->bind_param('sii', $type, $evaluation_id, $supervisor_id);
+        $duplicate_stmt->execute();
+        if ($duplicate_stmt->get_result()->fetch_assoc()) {
+            $action_error = 'An evaluation of this type already exists for that internship.';
+        } else {
+            $update_stmt = $conn->prepare("
+                UPDATE evaluations e
+                JOIN internships i ON i.internship_id = e.internship_id
+                SET e.evaluation_type = ?, e.rating = ?, e.comments = ?
+                WHERE e.evaluation_id = ? AND i.supervisor_id = ?
+            ");
+            $update_stmt->bind_param('sdsii', $type, $rating, $comments, $evaluation_id, $supervisor_id);
+            if ($update_stmt->execute()) {
+                $_SESSION['evaluation_notice'] = 'Evaluation updated.';
+                header('Location: evaluations.php');
+                exit;
+            }
+            $action_error = 'Could not update this evaluation.';
+        }
+    }
+}
 
 $summary_result = $conn->query("
     SELECT
@@ -75,6 +185,7 @@ $where_sql = implode(' AND ', $where);
 $evaluations_result = $conn->query("
     SELECT
         e.evaluation_id,
+        e.internship_id,
         e.evaluation_type,
         e.rating,
         e.comments,
@@ -245,6 +356,26 @@ include __DIR__ . '/../includes/header.php';
 
 <div class="evaluation-page">
 
+    <?php if ($action_notice !== ''): ?><div class="alert success"><?= htmlspecialchars($action_notice) ?></div><?php endif; ?>
+    <?php if ($action_error !== ''): ?><div class="alert"><?= htmlspecialchars($action_error) ?></div><?php endif; ?>
+
+    <div class="panel">
+        <div class="panel-head"><div><h2>Create Evaluation</h2><p>Submit a midterm or final evaluation for an assigned intern.</p></div></div>
+        <?php if ($intern_options): ?>
+            <form method="POST" class="crud-form">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+                <input type="hidden" name="action" value="create">
+                <label>Internship<select name="internship_id" required><option value="">Select intern</option><?php foreach ($intern_options as $option): ?><option value="<?= (int) $option['internship_id'] ?>"><?= htmlspecialchars($option['full_name'] . ' — ' . $option['company_name']) ?></option><?php endforeach; ?></select></label>
+                <label>Type<select name="evaluation_type" required><option value="midterm">Midterm</option><option value="final">Final</option></select></label>
+                <label>Rating (1–5)<input type="number" name="rating" min="1" max="5" step="0.01" required></label>
+                <label>Comments<textarea name="comments" maxlength="10000" rows="3" required></textarea></label>
+                <button class="btn primary" type="submit">Submit evaluation</button>
+            </form>
+        <?php else: ?>
+            <div class="empty-state">No assigned internships are available for evaluation.</div>
+        <?php endif; ?>
+    </div>
+
     <div class="cards">
 
         <div class="stat-card">
@@ -371,6 +502,7 @@ include __DIR__ . '/../includes/header.php';
                         <th>Rating</th>
                         <th>Comments</th>
                         <th>Submitted</th>
+                        <th>Manage</th>
                     </tr>
                 </thead>
 
@@ -438,6 +570,21 @@ include __DIR__ . '/../includes/header.php';
                                     ?>
                                 </td>
 
+                                <td>
+                                    <details class="crud-editor">
+                                        <summary>Edit</summary>
+                                        <form method="POST" class="crud-form stacked">
+                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+                                            <input type="hidden" name="action" value="update">
+                                            <input type="hidden" name="evaluation_id" value="<?= (int) $evaluation['evaluation_id'] ?>">
+                                            <label>Type<select name="evaluation_type"><option value="midterm" <?= $evaluation['evaluation_type'] === 'midterm' ? 'selected' : '' ?>>Midterm</option><option value="final" <?= $evaluation['evaluation_type'] === 'final' ? 'selected' : '' ?>>Final</option></select></label>
+                                            <label>Rating<input type="number" name="rating" min="1" max="5" step="0.01" required value="<?= htmlspecialchars((string) $evaluation['rating']) ?>"></label>
+                                            <label>Comments<textarea name="comments" maxlength="10000" rows="3" required><?= htmlspecialchars($evaluation['comments'] ?? '') ?></textarea></label>
+                                            <button class="btn primary" type="submit">Save evaluation</button>
+                                        </form>
+                                    </details>
+                                </td>
+
                             </tr>
 
                         <?php endwhile; ?>
@@ -445,7 +592,7 @@ include __DIR__ . '/../includes/header.php';
                     <?php else: ?>
 
                         <tr>
-                            <td colspan="7">
+                            <td colspan="8">
                                 <div class="empty-state">
                                     No evaluation records found.
                                 </div>

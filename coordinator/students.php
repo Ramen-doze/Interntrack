@@ -4,19 +4,74 @@ require_once __DIR__ . '/../includes/auth.php';
 require_role(['coordinator']);
 
 $page_title = 'Students';
+$action_error = '';
+$action_notice = $_SESSION['student_action_notice'] ?? '';
+unset($_SESSION['student_action_notice']);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
+        http_response_code(400);
+        exit('Invalid form submission. Refresh the page and try again.');
+    }
+
+    $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
+    $student_id_raw = $_POST['student_id'] ?? null;
+    $student_id = is_string($student_id_raw)
+        ? filter_var($student_id_raw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+        : false;
+    $full_name = is_string($_POST['full_name'] ?? null) ? trim($_POST['full_name']) : '';
+    $student_number = is_string($_POST['student_number'] ?? null) ? trim($_POST['student_number']) : '';
+    $email = is_string($_POST['email'] ?? null) ? trim($_POST['email']) : '';
+    $password = is_string($_POST['password'] ?? null) ? $_POST['password'] : '';
+    $status_value = is_string($_POST['student_status'] ?? null) ? $_POST['student_status'] : 'active';
+
+    if (!in_array($action, ['create', 'update'], true) || $full_name === '' || strlen($full_name) > 150
+        || $student_number === '' || strlen($student_number) > 30
+        || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 150
+        || !in_array($status_value, ['active', 'inactive'], true)
+        || ($action === 'update' && $student_id === false)) {
+        $action_error = 'Enter a valid student name, number, email, and account status.';
+    } elseif ($action === 'create' && strlen($password) < 8) {
+        $action_error = 'Set a temporary password of at least 8 characters.';
+    } else {
+        if ($action === 'create') {
+            $password_hash = password_hash($password, PASSWORD_DEFAULT);
+            $create_stmt = $conn->prepare("
+                INSERT INTO users (student_number, full_name, email, password_hash, role, status)
+                VALUES (?, ?, ?, ?, 'student', ?)
+            ");
+            $create_stmt->bind_param('sssss', $student_number, $full_name, $email, $password_hash, $status_value);
+            $save_stmt = $create_stmt;
+        } else {
+            $save_stmt = $conn->prepare("
+                UPDATE users
+                SET student_number = ?, full_name = ?, email = ?, status = ?
+                WHERE user_id = ? AND role = 'student'
+            ");
+            $save_stmt->bind_param('ssssi', $student_number, $full_name, $email, $status_value, $student_id);
+        }
+
+        if ($save_stmt->execute()) {
+            $_SESSION['student_action_notice'] = $action === 'create' ? 'Student account created.' : 'Student account updated.';
+            header('Location: students.php');
+            exit;
+        }
+        $action_error = 'Could not save this student. Check that the email and student number are not already in use.';
+    }
+}
 
 $search = trim($_GET['search'] ?? '');
 $status = $_GET['status'] ?? '';
 
 $allowed_statuses = [
     'active',
-    'inactive',
-    'pending'
+    'inactive'
 ];
 
 $sql = "
     SELECT
         u.user_id,
+        u.student_number,
         u.full_name,
         u.email,
         u.status,
@@ -65,6 +120,7 @@ $sql .= "
         u.full_name,
         u.email,
         u.status,
+        u.student_number,
         u.created_at
     ORDER BY u.created_at DESC
 ";
@@ -129,11 +185,6 @@ $active_students = student_count(
 $inactive_students = student_count(
     $conn,
     "status = 'inactive'"
-);
-
-$pending_students = student_count(
-    $conn,
-    "status = 'pending'"
 );
 
 require_once __DIR__ . '/../includes/header.php';
@@ -264,22 +315,6 @@ require_once __DIR__ . '/../includes/header.php';
     </div>
 
 
-    <div class="stat-card">
-
-        <div class="stat-icon">P</div>
-
-        <div>
-
-            <span>Pending Students</span>
-
-            <strong>
-                <?= $pending_students ?>
-            </strong>
-
-        </div>
-
-    </div>
-
 </div>
 
 <section class="panel" style="margin-top:24px;">
@@ -294,12 +329,6 @@ require_once __DIR__ . '/../includes/header.php';
                 View and monitor student accounts and internship records.
             </p>
 
-            <div class="student-count">
-
-                <?= count($students) ?>
-                student(s) currently shown
-
-            </div>
 
         </div>
 
@@ -312,6 +341,23 @@ require_once __DIR__ . '/../includes/header.php';
 
     </div>
 
+    <?php if ($action_notice !== ''): ?><div class="alert success"><?= htmlspecialchars($action_notice) ?></div><?php endif; ?>
+    <?php if ($action_error !== ''): ?><div class="alert"><?= htmlspecialchars($action_error) ?></div><?php endif; ?>
+
+    <details class="crud-editor" open>
+        <summary>Add student account</summary>
+        <br>
+        <form method="POST" class="crud-form">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+            <input type="hidden" name="action" value="create">
+            <label>Full name<input name="full_name" maxlength="150" required></label>
+            <label>Student number<input name="student_number" maxlength="30" required></label>
+            <label>Email<input type="email" name="email" maxlength="150" required></label>
+            <label>Temporary password<input type="password" name="password" minlength="8" required autocomplete="new-password"></label>
+            <button class="btn primary" type="submit" style="margin-top: 10px;">Create student</button>
+        </form>
+    </details>
+    <br>
     <form
         method="GET"
         class="filter-form"
@@ -345,13 +391,6 @@ require_once __DIR__ . '/../includes/header.php';
                 Inactive
             </option>
 
-            <option
-                value="pending"
-                <?= $status === 'pending' ? 'selected' : '' ?>
-            >
-                Pending
-            </option>
-
         </select>
 
 
@@ -380,12 +419,11 @@ require_once __DIR__ . '/../includes/header.php';
                     <th>Name</th>
 
                     <th>Email</th>
-
+                    <th>Student Number</th>
                     <th>Status</th>
-
                     <th>Internships</th>
-
                     <th>Registered</th>
+                    <th>Manage</th>
 
                 </tr>
 
@@ -413,6 +451,8 @@ require_once __DIR__ . '/../includes/header.php';
                             ) ?>
                         </td>
 
+                        <td><?= htmlspecialchars($student['student_number'] ?? '—') ?></td>
+
 
                         <td>
 
@@ -430,7 +470,6 @@ require_once __DIR__ . '/../includes/header.php';
                             </span>
 
                         </td>
-
 
                         <td>
 
@@ -456,6 +495,22 @@ require_once __DIR__ . '/../includes/header.php';
 
                         </td>
 
+                        <td>
+                            <details class="crud-editor">
+                                <summary>Edit</summary>
+                                <form method="POST" class="crud-form stacked">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+                                    <input type="hidden" name="action" value="update">
+                                    <input type="hidden" name="student_id" value="<?= (int) $student['user_id'] ?>">
+                                    <label>Name<input name="full_name" maxlength="150" required value="<?= htmlspecialchars($student['full_name']) ?>"></label>
+                                    <label>Student number<input name="student_number" maxlength="30" required value="<?= htmlspecialchars($student['student_number'] ?? '') ?>"></label>
+                                    <label>Email<input type="email" name="email" maxlength="150" required value="<?= htmlspecialchars($student['email']) ?>"></label>
+                                    <label>Status<select name="student_status"><option value="active" <?= $student['status'] === 'active' ? 'selected' : '' ?>>Active</option><option value="inactive" <?= $student['status'] === 'inactive' ? 'selected' : '' ?>>Inactive</option></select></label>
+                                    <button class="btn primary" type="submit">Save changes</button>
+                                </form>
+                            </details>
+                        </td>
+
                     </tr>
 
                 <?php endforeach; ?>
@@ -465,7 +520,7 @@ require_once __DIR__ . '/../includes/header.php';
                 <tr>
 
                     <td
-                        colspan="5"
+                        colspan="7"
                         class="empty-state"
                     >
                         No students found.

@@ -104,10 +104,10 @@ CREATE TABLE activity_logs (
 
 INSERT INTO users (student_number, full_name, email, password_hash, role)
 VALUES
-('2026-0001', 'Demo Student', 'student@interntrack.test', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC1pGfX0wK1QJjKf8K6', 'student'),
-(NULL, 'Demo Coordinator', 'coordinator@interntrack.test', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC1pGfX0wK1QJjKf8K6', 'coordinator'),
-(NULL, 'Demo Supervisor', 'supervisor@interntrack.test', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC1pGfX0wK1QJjKf8K6', 'supervisor'),
-(NULL, 'Demo Admin', 'admin@interntrack.test', '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC1pGfX0wK1QJjKf8K6', 'admin');
+('2026-0001', 'Demo Student', 'student@interntrack.test', '$2y$12$a4TCzWJtMcCPYhV7OHikaOGEI/yLScd/o4s7OsQVzB.eiMXbIs92K', 'student'),
+(NULL, 'Demo Coordinator', 'coordinator@interntrack.test', '$2y$12$a4TCzWJtMcCPYhV7OHikaOGEI/yLScd/o4s7OsQVzB.eiMXbIs92K', 'coordinator'),
+(NULL, 'Demo Supervisor', 'supervisor@interntrack.test', '$2y$12$a4TCzWJtMcCPYhV7OHikaOGEI/yLScd/o4s7OsQVzB.eiMXbIs92K', 'supervisor'),
+(NULL, 'Demo Admin', 'admin@interntrack.test', '$2y$12$a4TCzWJtMcCPYhV7OHikaOGEI/yLScd/o4s7OsQVzB.eiMXbIs92K', 'admin');
 
 INSERT INTO companies (company_name, address, contact_person, contact_email, contact_number)
 VALUES

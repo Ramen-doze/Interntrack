@@ -47,7 +47,7 @@ $pending_requirements = $conn->query("
 $pending_reports = $conn->query("
     SELECT COUNT(*) AS total
     FROM accomplishment_reports
-    WHERE status = 'pending'
+    WHERE status = 'submitted'
 ")->fetch_assoc()['total'];
 
 $status_summary = $conn->query("

@@ -135,6 +135,50 @@ $attendance_ready =
     $attendance_table_exists &&
     $has_supervisor_id &&
     ($internship_column !== null || $student_column !== null);
+$can_verify_attendance = $attendance_ready
+    && in_array('attendance_id', $attendance_columns, true)
+    && in_array('verified_by', $attendance_columns, true)
+    && in_array('status', $attendance_columns, true);
+
+$attendance_action_error = '';
+$attendance_notice = $_SESSION['attendance_review_notice'] ?? '';
+unset($_SESSION['attendance_review_notice']);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
+        http_response_code(400);
+        exit('Invalid form submission. Refresh the page and try again.');
+    }
+
+    $attendance_id_raw = $_POST['attendance_id'] ?? null;
+    $attendance_id = is_string($attendance_id_raw)
+        ? filter_var($attendance_id_raw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+        : false;
+    $decision = is_string($_POST['decision'] ?? null) ? $_POST['decision'] : '';
+
+    if (!$can_verify_attendance || $attendance_id === false
+        || !in_array($decision, ['present', 'late', 'absent'], true)) {
+        $attendance_action_error = 'Choose a valid attendance record and verification status.';
+    } else {
+        $verify_stmt = $conn->prepare("
+            UPDATE attendance a
+            JOIN internships i ON i.internship_id = a.internship_id
+            SET a.status = ?, a.verified_by = ?
+            WHERE a.attendance_id = ? AND i.supervisor_id = ?
+                AND a.status = 'pending' AND a.time_out IS NOT NULL
+        ");
+        $verify_stmt->bind_param('siii', $decision, $supervisor_id, $attendance_id, $supervisor_id);
+        $verify_stmt->execute();
+
+        if ($verify_stmt->affected_rows !== 1) {
+            $attendance_action_error = 'This record is not ready for verification or is not assigned to you.';
+        } else {
+            $_SESSION['attendance_review_notice'] = 'Attendance verification saved.';
+            header('Location: attendance.php');
+            exit;
+        }
+    }
+}
 
 $search = trim($_GET['search'] ?? '');
 $status = trim($_GET['status'] ?? '');
@@ -228,6 +272,10 @@ if ($attendance_ready) {
             WHERE i.supervisor_id = {$supervisor_id}
         ";
 
+        if ($status_column !== null) {
+            $hours_sql .= " AND LOWER(a.`{$status_column}`) IN ('present', 'late')";
+        }
+
         $hours_result = $conn->query($hours_sql);
 
         if ($hours_result) {
@@ -304,9 +352,13 @@ if ($attendance_ready) {
     $select_hours = $hours_column !== null
         ? "a.`{$hours_column}` AS hours_rendered"
         : "NULL AS hours_rendered";
+    $select_attendance_id = in_array('attendance_id', $attendance_columns, true)
+        ? 'a.attendance_id'
+        : 'NULL AS attendance_id';
 
     $records_sql = "
         SELECT
+            {$select_attendance_id},
             u.full_name AS student_name,
             u.email AS student_email,
             c.company_name,
@@ -424,6 +476,8 @@ require_once __DIR__ . '/../includes/header.php';
 
 <?php else: ?>
 
+    <?php if ($attendance_notice !== ''): ?><div class="alert success"><?= htmlspecialchars($attendance_notice) ?></div><?php endif; ?>
+    <?php if ($attendance_action_error !== ''): ?><div class="alert"><?= htmlspecialchars($attendance_action_error) ?></div><?php endif; ?>
 
     <div class="cards">
 
@@ -535,13 +589,6 @@ require_once __DIR__ . '/../includes/header.php';
                             Absent
                         </option>
 
-                        <option
-                            value="leave"
-                            <?php echo $status === 'leave' ? 'selected' : ''; ?>
-                        >
-                            Leave
-                        </option>
-
                     </select>
 
                 </div>
@@ -600,6 +647,7 @@ require_once __DIR__ . '/../includes/header.php';
                         <th>Time Out</th>
                         <th>Hours</th>
                         <th>Status</th>
+                        <?php if ($can_verify_attendance): ?><th>Verification</th><?php endif; ?>
 
                     </tr>
 
@@ -690,6 +738,21 @@ require_once __DIR__ . '/../includes/header.php';
 
                                 </td>
 
+                                <?php if ($can_verify_attendance): ?>
+                                    <td>
+                                        <?php if ($record['attendance_status'] === 'pending' && $record['time_out'] !== null && $record['attendance_id'] !== null): ?>
+                                            <form method="POST" class="crud-form stacked">
+                                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+                                                <input type="hidden" name="attendance_id" value="<?= (int) $record['attendance_id'] ?>">
+                                                <label>Verification status<select name="decision"><option value="present">Present</option><option value="late">Late</option><option value="absent">Absent</option></select></label>
+                                                <button class="btn primary" type="submit">Verify</button>
+                                            </form>
+                                        <?php elseif ($record['attendance_status'] === 'pending'): ?>
+                                            Waiting for student check-out
+                                        <?php else: ?>Verified<?php endif; ?>
+                                    </td>
+                                <?php endif; ?>
+
                             </tr>
 
                         <?php endforeach; ?>
@@ -698,7 +761,7 @@ require_once __DIR__ . '/../includes/header.php';
 
                         <tr>
 
-                            <td colspan="7" class="empty-state">
+                            <td colspan="<?= $can_verify_attendance ? '8' : '7' ?>" class="empty-state">
                                 No attendance records found.
                             </td>
 

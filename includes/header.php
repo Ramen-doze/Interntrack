@@ -31,7 +31,7 @@ require_login();
             <a href="/interntrack/student/attendance.php">Attendance</a>
             <a href="/interntrack/student/reports.php">Accomplishment Reports</a>
         <?php elseif ($_SESSION['role'] === 'coordinator'): ?>
-            <a href="/interntrack/coordinator/students.php">Students</a><a href="/interntrack/coordinator/companies.php">Companies</a><a href="/interntrack/coordinator/assignments.php">Assignments</a><a href="/interntrack/coordinator/reports.php">Reports</a>
+            <a href="/interntrack/coordinator/students.php">Students</a><a href="/interntrack/coordinator/companies.php">Companies</a><a href="/interntrack/coordinator/assignments.php">Assignments</a><a href="/interntrack/coordinator/attendance.php">Attendance</a><a href="/interntrack/coordinator/requirements.php">Requirements</a><a href="/interntrack/coordinator/reports.php">Reports</a>
         <?php elseif ($_SESSION['role'] === 'supervisor'): ?>
             <a href="/interntrack/supervisor/my-interns.php">My Interns</a><a href="/interntrack/supervisor/attendance.php">Attendance</a><a href="/interntrack/supervisor/reports.php">Reports</a><a href="/interntrack/supervisor/evaluations.php">Evaluations</a>
         <?php else: ?>
@@ -41,10 +41,3 @@ require_login();
     </nav>
 </aside>
 <main class="content">
-<header class="topbar">
-    <div>
-        <h1><?= htmlspecialchars($page_title ?? 'Dashboard') ?></h1>
-        <p>Internship/OJT Monitoring and Management System</p>
-    </div>
-    <div class="user-pill"><?= htmlspecialchars($_SESSION['full_name']) ?></div>
-</header>

@@ -20,7 +20,7 @@ unset($_SESSION['login_error']);
 <body class="login-page">
 <div class="login-card">
     <div class="brand large">Intern<span>Track</span></div>
-    <p class="muted">Internship/OJT Monitoring and Management System</p>
+    <p class="muted">Internship Monitoring and Management System</p>
 
     <?php if ($error): ?><div class="alert"><?= htmlspecialchars($error) ?></div><?php endif; ?>
 

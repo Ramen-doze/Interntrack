@@ -4,6 +4,147 @@ require_once __DIR__ . '/../includes/auth.php';
 require_role(['coordinator']);
 
 $page_title = 'Assignments';
+$action_error = '';
+$action_notice = $_SESSION['assignment_action_notice'] ?? '';
+unset($_SESSION['assignment_action_notice']);
+
+$students_for_assignment = $conn->query("
+    SELECT user_id, full_name, student_number
+    FROM users
+    WHERE role = 'student'
+    ORDER BY full_name
+");
+$companies_for_assignment = $conn->query("
+    SELECT company_id, company_name
+    FROM companies
+    ORDER BY company_name
+");
+$supervisors_for_assignment = $conn->query("
+    SELECT user_id, full_name
+    FROM users
+    WHERE role = 'supervisor'
+    ORDER BY full_name
+");
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
+        http_response_code(400);
+        exit('Invalid form submission. Refresh the page and try again.');
+    }
+
+    $action = is_string($_POST['action'] ?? null) ? $_POST['action'] : '';
+    $id_value = is_string($_POST['internship_id'] ?? null) ? $_POST['internship_id'] : '';
+    $student_value = is_string($_POST['student_id'] ?? null) ? $_POST['student_id'] : '';
+    $company_value = is_string($_POST['company_id'] ?? null) ? $_POST['company_id'] : '';
+    $supervisor_value = is_string($_POST['supervisor_id'] ?? null) ? $_POST['supervisor_id'] : '';
+    $start_date = is_string($_POST['start_date'] ?? null) ? $_POST['start_date'] : '';
+    $end_date = is_string($_POST['end_date'] ?? null) ? $_POST['end_date'] : '';
+    $hours_value = is_string($_POST['required_hours'] ?? null) ? $_POST['required_hours'] : '';
+    $status_value = is_string($_POST['assignment_status'] ?? null) ? $_POST['assignment_status'] : '';
+    $internship_id = filter_var($id_value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    $student_id = filter_var($student_value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    $company_id = filter_var($company_value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    $supervisor_id = $supervisor_value === '' ? null : filter_var($supervisor_value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    $required_hours = filter_var($hours_value, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 100000]]);
+    $valid_date = static function (string $value): bool {
+        if ($value === '') {
+            return true;
+        }
+
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+        return $date !== false && $date->format('Y-m-d') === $value;
+    };
+    $valid_action = in_array($action, ['create', 'update'], true);
+    $valid_status = in_array($status_value, ['pending', 'ongoing', 'completed', 'cancelled'], true);
+
+    if (!$valid_action || $student_id === false || $company_id === false
+        || $required_hours === false || !$valid_status
+        || ($action === 'update' && $internship_id === false)
+        || ($supervisor_value !== '' && $supervisor_id === false)
+        || !$valid_date($start_date) || !$valid_date($end_date)
+        || ($start_date !== '' && $end_date !== '' && $end_date < $start_date)) {
+        $action_error = 'Enter a student, company, valid date range, required hours, supervisor, and status.';
+    } else {
+        $active_only = $action === 'create' ? " AND status = 'active'" : '';
+        $student_check = $conn->prepare("SELECT user_id FROM users WHERE user_id = ? AND role = 'student'{$active_only}");
+        $student_check->bind_param('i', $student_id);
+        $student_check->execute();
+        $company_check = $conn->prepare("SELECT company_id FROM companies WHERE company_id = ?{$active_only}");
+        $company_check->bind_param('i', $company_id);
+        $company_check->execute();
+        $valid_supervisor = true;
+        if ($supervisor_id !== null) {
+            $supervisor_check = $conn->prepare("SELECT user_id FROM users WHERE user_id = ? AND role = 'supervisor'{$active_only}");
+            $supervisor_check->bind_param('i', $supervisor_id);
+            $supervisor_check->execute();
+            $valid_supervisor = (bool) $supervisor_check->get_result()->fetch_assoc();
+        }
+
+        if (!$student_check->get_result()->fetch_assoc() || !$company_check->get_result()->fetch_assoc() || !$valid_supervisor) {
+            $action_error = 'Choose an active student, company, and supervisor.';
+        } else {
+            if ($action === 'create') {
+                $duplicate_stmt = $conn->prepare("
+                    SELECT internship_id FROM internships
+                    WHERE student_id = ? AND status IN ('pending', 'ongoing')
+                    LIMIT 1
+                ");
+                $duplicate_stmt->bind_param('i', $student_id);
+                $duplicate_stmt->execute();
+                if ($duplicate_stmt->get_result()->fetch_assoc()) {
+                    $action_error = 'This student already has a pending or ongoing internship assignment.';
+                } else {
+                    $create_stmt = $conn->prepare("
+                        INSERT INTO internships
+                            (student_id, company_id, supervisor_id, coordinator_id, start_date, end_date, required_hours, status)
+                        VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                    ");
+                    $coordinator_id = (int) $_SESSION['user_id'];
+                    $create_stmt->bind_param('iiiissis', $student_id, $company_id, $supervisor_id, $coordinator_id, $start_date, $end_date, $required_hours, $status_value);
+                    if ($create_stmt->execute()) {
+                        $_SESSION['assignment_action_notice'] = 'Internship assignment created.';
+                        header('Location: assignments.php');
+                        exit;
+                    }
+                    $action_error = 'Could not create the internship assignment.';
+                }
+            } else {
+                $duplicate_stmt = $conn->prepare("
+                    SELECT internship_id FROM internships
+                    WHERE student_id = ? AND status IN ('pending', 'ongoing')
+                        AND internship_id <> ?
+                    LIMIT 1
+                ");
+                $duplicate_stmt->bind_param('ii', $student_id, $internship_id);
+                $duplicate_stmt->execute();
+                $duplicate_assignment = $duplicate_stmt->get_result()->fetch_assoc();
+
+                if ($status_value !== 'cancelled' && $status_value !== 'completed'
+                    && $duplicate_assignment) {
+                    $action_error = 'This student already has another pending or ongoing internship assignment.';
+                } else {
+                    $update_stmt = $conn->prepare("
+                        UPDATE internships
+                        SET student_id = ?, company_id = ?, supervisor_id = ?, start_date = NULLIF(?, ''),
+                            end_date = NULLIF(?, ''), required_hours = ?, status = ?
+                        WHERE internship_id = ?
+                    ");
+                    $update_stmt->bind_param('iiissisi', $student_id, $company_id, $supervisor_id, $start_date, $end_date, $required_hours, $status_value, $internship_id);
+                    if ($update_stmt->execute()) {
+                        $_SESSION['assignment_action_notice'] = 'Internship assignment updated.';
+                        header('Location: assignments.php');
+                        exit;
+                    }
+                    $action_error = 'Could not update the internship assignment.';
+                }
+            }
+        }
+    }
+}
+
+$student_options = $students_for_assignment ? $students_for_assignment->fetch_all(MYSQLI_ASSOC) : [];
+$company_options = $companies_for_assignment ? $companies_for_assignment->fetch_all(MYSQLI_ASSOC) : [];
+$supervisor_options = $supervisors_for_assignment ? $supervisors_for_assignment->fetch_all(MYSQLI_ASSOC) : [];
 
 $search = trim($_GET['search'] ?? '');
 $status = $_GET['status'] ?? '';
@@ -18,6 +159,10 @@ $allowed_statuses = [
 $sql = "
     SELECT
         i.internship_id,
+        i.student_id,
+        i.company_id,
+        i.supervisor_id,
+        i.required_hours,
         i.status,
         i.start_date,
         i.end_date,
@@ -294,12 +439,6 @@ require_once __DIR__ . '/../includes/header.php';
                 View and monitor student-to-company internship assignments.
             </p>
 
-            <div class="assignment-count">
-
-                <?= count($assignments) ?>
-                assignment(s) currently shown
-
-            </div>
 
         </div>
 
@@ -310,6 +449,26 @@ require_once __DIR__ . '/../includes/header.php';
 
     </div>
 
+    <?php if ($action_notice !== ''): ?><div class="alert success"><?= htmlspecialchars($action_notice) ?></div><?php endif; ?>
+    <?php if ($action_error !== ''): ?><div class="alert"><?= htmlspecialchars($action_error) ?></div><?php endif; ?>
+
+    <details class="crud-editor" open>
+        <summary>Create internship assignment</summary>
+        <br>
+        <form method="POST" class="crud-form">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+            <input type="hidden" name="action" value="create">
+            <label>Student<select name="student_id" required><option value="">Select student</option><?php foreach ($student_options as $option): ?><option value="<?= (int) $option['user_id'] ?>"><?= htmlspecialchars($option['full_name'] . ($option['student_number'] ? ' (' . $option['student_number'] . ')' : '')) ?></option><?php endforeach; ?></select></label>
+            <label>Company<select name="company_id" required><option value="">Select company</option><?php foreach ($company_options as $option): ?><option value="<?= (int) $option['company_id'] ?>"><?= htmlspecialchars($option['company_name']) ?></option><?php endforeach; ?></select></label>
+            <label>Supervisor<select name="supervisor_id"><option value="">Not assigned</option><?php foreach ($supervisor_options as $option): ?><option value="<?= (int) $option['user_id'] ?>"><?= htmlspecialchars($option['full_name']) ?></option><?php endforeach; ?></select></label>
+            <label>Start date<input type="date" name="start_date"></label>
+            <label>End date<input type="date" name="end_date"></label>
+            <label>Required hours<input type="number" name="required_hours" min="1" max="100000" required></label>
+            <label>Status<select name="assignment_status"><option value="pending">Pending</option><option value="ongoing">Ongoing</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option></select></label>
+            <button class="btn primary" type="submit" style="margin-top: 10px;">Create assignment</button>
+        </form>
+    </details>
+    <br>
     <form
         method="GET"
         class="filter-form"
@@ -393,6 +552,7 @@ require_once __DIR__ . '/../includes/header.php';
                     <th>End</th>
 
                     <th>Created</th>
+                    <th>Manage</th>
 
                 </tr>
 
@@ -513,6 +673,25 @@ require_once __DIR__ . '/../includes/header.php';
 
                         </td>
 
+                        <td>
+                            <details class="crud-editor">
+                                <summary>Edit</summary>
+                                <form method="POST" class="crud-form stacked">
+                                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+                                    <input type="hidden" name="action" value="update">
+                                    <input type="hidden" name="internship_id" value="<?= (int) $assignment['internship_id'] ?>">
+                                    <label>Student<select name="student_id" required><?php foreach ($student_options as $option): ?><option value="<?= (int) $option['user_id'] ?>" <?= (int) $option['user_id'] === (int) $assignment['student_id'] ? 'selected' : '' ?>><?= htmlspecialchars($option['full_name']) ?></option><?php endforeach; ?></select></label>
+                                    <label>Company<select name="company_id" required><?php foreach ($company_options as $option): ?><option value="<?= (int) $option['company_id'] ?>" <?= (int) $option['company_id'] === (int) $assignment['company_id'] ? 'selected' : '' ?>><?= htmlspecialchars($option['company_name']) ?></option><?php endforeach; ?></select></label>
+                                    <label>Supervisor<select name="supervisor_id"><option value="">Not assigned</option><?php foreach ($supervisor_options as $option): ?><option value="<?= (int) $option['user_id'] ?>" <?= (int) $option['user_id'] === (int) $assignment['supervisor_id'] ? 'selected' : '' ?>><?= htmlspecialchars($option['full_name']) ?></option><?php endforeach; ?></select></label>
+                                    <label>Start date<input type="date" name="start_date" value="<?= htmlspecialchars($assignment['start_date'] ?? '') ?>"></label>
+                                    <label>End date<input type="date" name="end_date" value="<?= htmlspecialchars($assignment['end_date'] ?? '') ?>"></label>
+                                    <label>Required hours<input type="number" name="required_hours" min="1" max="100000" required value="<?= (int) $assignment['required_hours'] ?>"></label>
+                                    <label>Status<select name="assignment_status"><?php foreach ($allowed_statuses as $option_status): ?><option value="<?= $option_status ?>" <?= $assignment['status'] === $option_status ? 'selected' : '' ?>><?= htmlspecialchars(ucfirst($option_status)) ?></option><?php endforeach; ?></select></label>
+                                    <button class="btn primary" type="submit">Save changes</button>
+                                </form>
+                            </details>
+                        </td>
+
                     </tr>
 
                 <?php endforeach; ?>
@@ -522,7 +701,7 @@ require_once __DIR__ . '/../includes/header.php';
                 <tr>
 
                     <td
-                        colspan="6"
+                        colspan="7"
                         class="empty-state"
                     >
                         No internship assignments found.

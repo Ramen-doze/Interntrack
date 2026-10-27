@@ -44,6 +44,51 @@ $reports_ready = (
     $has_supervisor_id
 );
 
+$review_error = '';
+$notice = $_SESSION['report_review_notice'] ?? '';
+unset($_SESSION['report_review_notice']);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
+        http_response_code(400);
+        exit('Invalid form submission. Refresh the page and try again.');
+    }
+
+    $report_id_raw = $_POST['report_id'] ?? null;
+    $report_id = is_string($report_id_raw)
+        ? filter_var($report_id_raw, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+        : false;
+    $decision = is_string($_POST['decision'] ?? null) ? $_POST['decision'] : '';
+    $remarks = is_string($_POST['remarks'] ?? null) ? trim($_POST['remarks']) : '';
+
+    if (!$reports_ready) {
+        $review_error = 'Report review is not available until the report and supervisor assignment tables are set up.';
+    } elseif ($report_id === false) {
+        $review_error = 'The selected report is invalid.';
+    } elseif (!in_array($decision, ['reviewed', 'rejected'], true)) {
+        $review_error = 'Choose a valid report decision.';
+    } elseif ($remarks === '' || strlen($remarks) > 10000) {
+        $review_error = 'Enter feedback no longer than 10,000 characters.';
+    } else {
+        $review_stmt = $conn->prepare("
+            UPDATE accomplishment_reports ar
+            JOIN internships i ON i.internship_id = ar.internship_id
+            SET ar.status = ?, ar.remarks = ?, ar.reviewed_at = NOW()
+            WHERE ar.report_id = ? AND i.supervisor_id = ? AND ar.status = 'submitted'
+        ");
+        $review_stmt->bind_param('ssii', $decision, $remarks, $report_id, $supervisor_id);
+        $review_stmt->execute();
+
+        if ($review_stmt->affected_rows !== 1) {
+            $review_error = 'This report is unavailable, has already been reviewed, or is not assigned to you.';
+        } else {
+            $_SESSION['report_review_notice'] = 'The report review was saved.';
+            header('Location: reports.php');
+            exit;
+        }
+    }
+}
+
 
 if ($reports_ready) {
 
@@ -177,6 +222,13 @@ if ($reports_ready) {
 require_once __DIR__ . '/../includes/header.php';
 ?>
 
+<?php if ($notice !== ''): ?>
+    <div class="alert success"><?= htmlspecialchars($notice) ?></div>
+<?php endif; ?>
+
+<?php if ($review_error !== ''): ?>
+    <div class="alert"><?= htmlspecialchars($review_error) ?></div>
+<?php endif; ?>
 
 <?php if (!$reports_ready): ?>
 
@@ -375,6 +427,7 @@ require_once __DIR__ . '/../includes/header.php';
                         <th>Status</th>
                         <th>Submitted</th>
                         <th>Reviewed</th>
+                        <th>Review</th>
                     </tr>
 
                 </thead>
@@ -422,6 +475,10 @@ require_once __DIR__ . '/../includes/header.php';
                                         $report['report_title']
                                     );
                                     ?>
+                                    <details class="report-details">
+                                        <summary>View description</summary>
+                                        <p><?= nl2br(htmlspecialchars($report['description'])) ?></p>
+                                    </details>
                                 </td>
 
 
@@ -473,6 +530,30 @@ require_once __DIR__ . '/../includes/header.php';
                                     ?>
                                 </td>
 
+                                <td>
+                                    <?php if ($report['status'] === 'submitted'): ?>
+                                        <form method="POST" class="review-form">
+                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrf_token()) ?>">
+                                            <input type="hidden" name="report_id" value="<?= (int) $report['report_id'] ?>">
+                                            <label class="sr-only" for="remarks-<?= (int) $report['report_id'] ?>">Feedback</label>
+                                            <textarea
+                                                id="remarks-<?= (int) $report['report_id'] ?>"
+                                                name="remarks"
+                                                maxlength="10000"
+                                                rows="3"
+                                                placeholder="Feedback for the student"
+                                                required
+                                            ></textarea>
+                                            <div class="review-actions">
+                                                <button class="btn primary" type="submit" name="decision" value="reviewed">Mark reviewed</button>
+                                                <button class="btn danger" type="submit" name="decision" value="rejected">Request revision</button>
+                                            </div>
+                                        </form>
+                                    <?php else: ?>
+                                        <?= htmlspecialchars($report['remarks'] ?: 'No feedback') ?>
+                                    <?php endif; ?>
+                                </td>
+
                             </tr>
 
                         <?php endforeach; ?>
@@ -481,7 +562,7 @@ require_once __DIR__ . '/../includes/header.php';
 
                         <tr>
 
-                            <td colspan="7" class="empty-state">
+                            <td colspan="8" class="empty-state">
                                 No accomplishment reports found.
                             </td>
 
